@@ -6,16 +6,17 @@
 #import <Foundation/Foundation.h>
 #import "HTTPConnection.h"
 
+
 @interface MyHTTPConnection : HTTPConnection
 {
 	int dataStartIndex;
-	NSMutableData* multipartData;
+	NSMutableArray* multipartData;
 	BOOL postHeaderOK;
 }
 
-+ (void)setSharedObserver:(NSObject*)observer;
-+ (id)sharedObserver;
+- (BOOL)isBrowseable:(NSString *)path;
+- (NSString *)createBrowseableIndex:(NSString *)path;
 
-@property(nonatomic, retain) NSMutableData* multipartData;
+- (BOOL)supportsPOST:(NSString *)path withSize:(UInt64)contentLength;
 
 @end

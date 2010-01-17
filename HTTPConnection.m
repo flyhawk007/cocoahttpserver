@@ -7,20 +7,19 @@
 #import "DDRange.h"
 #import "DDData.h"
 
-
 // Define chunk size used to read in data for responses
 // This is how much data will be read from disk into RAM at a time
 #if TARGET_OS_IPHONE
-  #define READ_CHUNKSIZE  (1024 * 128)
+#define READ_CHUNKSIZE  (1024 * 128)
 #else
-  #define READ_CHUNKSIZE  (1024 * 512)
+#define READ_CHUNKSIZE  (1024 * 512)
 #endif
 
 // Define chunk size used to read in POST upload data
 #if TARGET_OS_IPHONE
-  #define POST_CHUNKSIZE  (1024 * 32)
+#define POST_CHUNKSIZE  (1024 * 32)
 #else
-  #define POST_CHUNKSIZE  (1024 * 128)
+#define POST_CHUNKSIZE  (1024 * 128)
 #endif
 
 // Define the various timeouts (in seconds) for various parts of the HTTP process
@@ -52,7 +51,7 @@
 // The HTTP_RESPONSE and HTTP_FINAL_RESPONSE are designated tags signalling that the response is completely sent.
 // That is, in the onSocket:didWriteDataWithTag: method, if the tag is HTTP_RESPONSE or HTTP_FINAL_RESPONSE,
 // it is assumed that the response is now completely sent.
-// Use HTTP_RESPONSE if it's the end a response, and you want to start reading more requests afterwards.
+// Use HTTP_RESPONSE if it's the end of a response, and you want to start reading more requests afterwards.
 // Use HTTP_FINAL_RESPONSE if you wish to terminate the connection after sending the response.
 // 
 // If you are sending multiple data segments in a custom response, make sure that only the last segment has
@@ -131,12 +130,11 @@ static NSMutableArray *recentNonces;
 		
 		numHeaderLines = 0;
 		
-		// And now that we own the socket, and we have our CFHTTPMessage object (for requests) ready,
-		// we can start reading the HTTP requests...
-		[asyncSocket readDataToData:[AsyncSocket CRLFData]
-						withTimeout:READ_TIMEOUT
-						  maxLength:LIMIT_MAX_HEADER_LINE_LENGTH
-								tag:HTTP_REQUEST_HEADER];
+		// Don't start reading the HTTP request here.
+		// We are currently running on the thread that the server's listen socket is running on.
+		// However, the server may place us on a different thread.
+		// We should only read/write to our socket on its proper thread.
+		// Instead, we'll wait for the call to onSocket:didConnectToHost:port: which will be on the proper thread.
 	}
 	return self;
 }
@@ -168,18 +166,24 @@ static NSMutableArray *recentNonces;
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /**
- * Returns whether or not the server will accept POSTs.
- * That is, whether the server will accept uploaded data for the given URI.
+ * Returns whether or not the server will accept messages of a given method
+ * at a particular URI.
 **/
-- (BOOL)supportsPOST:(NSString *)path withSize:(UInt64)contentLength
+- (BOOL)supportsMethod:(NSString *)method atPath:(NSString *)relativePath
 {
-	// Override me to support POST uploads.
-	// Things to consider:
-	// - Does the given path represent a resource that is designed to accept POST data?
-	// - Is the size of the data being uploaded too big?
+	// Override me to support methods such as POST.
+	// 
+	// Things you may want to consider:
+	// - Does the given path represent a resource that is designed to accept this method?
+	// - If accepting an upload, is the size of the data being uploaded too big?
 	// 
 	// For more information, you can always access the CFHTTPMessageRef request variable.
 	
+	if([method isEqualToString:@"GET"])
+		return YES;
+	if([method isEqualToString:@"HEAD"])
+		return YES;
+		
 	return NO;
 }
 
@@ -259,7 +263,9 @@ static NSMutableArray *recentNonces;
 	// Override me to provide proper password authentication
 	// You can configure a password for the entire server, or custom passwords for users and/or resources
 	
-	// Note: A password of nil, or a zero-length password is considered the equivalent of no password
+	// Security Note:
+	// A nil password means no access at all. (Such as for user doesn't exist)
+	// An empty string password is allowed, and will be treated as any other password. (To support anonymous access)
 	
 	return nil;
 }
@@ -274,8 +280,8 @@ static NSMutableArray *recentNonces;
 	// We use the Core Foundation UUID class to generate a nonce value for us
 	// UUIDs (Universally Unique Identifiers) are 128-bit values guaranteed to be unique.
 	CFUUIDRef theUUID = CFUUIDCreate(NULL);
-    NSString *newNonce = [(NSString *)CFUUIDCreateString(NULL, theUUID) autorelease];
-    CFRelease(theUUID);
+	NSString *newNonce = [NSMakeCollectable(CFUUIDCreateString(NULL, theUUID)) autorelease];
+	CFRelease(theUUID);
 	
 	// We have to remember that the HTTP protocol is stateless
 	// Even though with version 1.1 persistent connections are the norm, they are not guaranteed
@@ -324,17 +330,16 @@ static NSMutableArray *recentNonces;
 		}
 		
 		NSString *password = [self passwordForUser:[auth username]];
-		if((password == nil) || ([password length] == 0))
+		if(password == nil)
 		{
-			// There is no password set, or the password is an empty string
-			// We can consider this the equivalent of not using password protection
-			return YES;
+			// No access allowed (username doesn't exist in system)
+			return NO;
 		}
 		
-		NSString *method = [(NSString *)CFHTTPMessageCopyRequestMethod(request) autorelease];
+		NSString *method = [NSMakeCollectable(CFHTTPMessageCopyRequestMethod(request)) autorelease];
 		
-		NSURL *absoluteUrl = [(NSURL *)CFHTTPMessageCopyRequestURL(request) autorelease];
-		NSString *url = [(NSURL *)absoluteUrl relativeString];
+		NSURL *absoluteUrl = [NSMakeCollectable(CFHTTPMessageCopyRequestURL(request)) autorelease];
+		NSString *url = [absoluteUrl relativeString];
 		
 		if(![url isEqualToString:[auth uri]])
 		{
@@ -370,13 +375,15 @@ static NSMutableArray *recentNonces;
 			}
 		}
 		
-		if([[auth nc] intValue] <= lastNC)
+		long authNC = strtol([[auth nc] UTF8String], NULL, 16);
+		
+		if(authNC <= lastNC)
 		{
 			// The nc value (nonce count) hasn't been incremented since the last request
 			// This could be a replay attack
 			return NO;
 		}
-		lastNC = [[auth nc] intValue];
+		lastNC = authNC;
 		
 		NSString *HA1str = [NSString stringWithFormat:@"%@:%@:%@", [auth username], [auth realm], password];
 		NSString *HA2str = [NSString stringWithFormat:@"%@:%@", method, [auth uri]];
@@ -424,11 +431,10 @@ static NSMutableArray *recentNonces;
 		NSString *credPassword = [credentials substringFromIndex:(colonRange.location + colonRange.length)];
 		
 		NSString *password = [self passwordForUser:credUsername];
-		if((password == nil) || ([password length] == 0))
+		if(password == nil)
 		{
-			// There is no password set, or the password is an empty string
-			// We can consider this the equivalent of not using password protection
-			return YES;
+			// No access allowed (username doesn't exist in system)
+			return NO;
 		}
 		
 		return [password isEqualToString:credPassword];
@@ -611,7 +617,7 @@ static NSMutableArray *recentNonces;
 	NSDateFormatter *df = [[[NSDateFormatter alloc] init] autorelease];
 	[df setFormatterBehavior:NSDateFormatterBehavior10_4];
 	[df setTimeZone:[NSTimeZone timeZoneWithAbbreviation:@"GMT"]];
-	[df setDateFormat:@"EEE, dd MMM y hh:mm:ss 'GMT'"];
+	[df setDateFormat:@"EEE, dd MMM y HH:mm:ss 'GMT'"];
 	
 	// For some reason, using zzz in the format string produces GMT+00:00
 	
@@ -625,23 +631,20 @@ static NSMutableArray *recentNonces;
 - (void)replyToHTTPRequest
 {
 	// Check the HTTP version - if it's anything but HTTP version 1.1, we don't support it
-	NSString *version = [(NSString *)CFHTTPMessageCopyVersion(request) autorelease];
+	NSString *version = [NSMakeCollectable(CFHTTPMessageCopyVersion(request)) autorelease];
 	if(!version || ![version isEqualToString:(NSString *)kCFHTTPVersion1_1])
 	{
 		[self handleVersionNotSupported:version];
 		return;
 	}
 	
-	// Check HTTP method
-	NSString *method = [(NSString *)CFHTTPMessageCopyRequestMethod(request) autorelease];
-    if(![method isEqualToString:@"GET"] && ![method isEqualToString:@"HEAD"] && ![method isEqualToString:@"POST"])
-	{
-		[self handleUnknownMethod:method];
-        return;
-    }
+	// Extract the method
+	NSString *method = [NSMakeCollectable(CFHTTPMessageCopyRequestMethod(request)) autorelease];
+	
+	// Note: We already checked to ensure the method was supported in onSocket:didReadData:withTag:
 	
 	// Extract requested URI
-	NSURL *uri = [(NSURL *)CFHTTPMessageCopyRequestURL(request) autorelease];
+	NSURL *uri = [NSMakeCollectable(CFHTTPMessageCopyRequestURL(request)) autorelease];
 	
 	// Check Authentication (if needed)
 	// If not properly authenticated for resource, issue Unauthorized response
@@ -652,7 +655,7 @@ static NSMutableArray *recentNonces;
 	}
 	
 	// Respond properly to HTTP 'GET' and 'HEAD' commands
-	httpResponse = [[self httpResponseForURI:[uri relativeString]] retain];
+	httpResponse = [[self httpResponseForMethod:method URI:[uri relativeString]] retain];
 	
 	UInt64 contentLength = httpResponse ? [httpResponse contentLength] : 0;
 	
@@ -667,7 +670,7 @@ static NSMutableArray *recentNonces;
     }
 	
 	// Check for specific range request
-	NSString *rangeHeader = [(NSString *)CFHTTPMessageCopyHeaderFieldValue(request, CFSTR("Range")) autorelease];
+	NSString *rangeHeader = [NSMakeCollectable(CFHTTPMessageCopyHeaderFieldValue(request, CFSTR("Range"))) autorelease];
 	
 	BOOL isRangeRequest = NO;
 	
@@ -819,7 +822,7 @@ static NSMutableArray *recentNonces;
 	ranges_headers = [[NSMutableArray alloc] initWithCapacity:[ranges count]];
 	
 	CFUUIDRef theUUID = CFUUIDCreate(NULL);
-	ranges_boundry = (NSString *)CFUUIDCreateString(NULL, theUUID);
+	ranges_boundry = NSMakeCollectable(CFUUIDCreateString(NULL, theUUID));
 	CFRelease(theUUID);
 	
 	NSString *startingBoundryStr = [NSString stringWithFormat:@"\r\n--%@\r\n", ranges_boundry];
@@ -908,9 +911,9 @@ static NSMutableArray *recentNonces;
  * You may return any object that adopts the HTTPResponse protocol.
  * The HTTPServer comes with two such classes: HTTPFileResponse and HTTPDataResponse.
  * HTTPFileResponse is a wrapper for an NSFileHandle object, and is the preferred way to send a file response.
- * HTTPDataResopnse is a wrapper for an NSData object, and may be used to send a custom response.
+ * HTTPDataResponse is a wrapper for an NSData object, and may be used to send a custom response.
 **/
-- (NSObject<HTTPResponse> *)httpResponseForURI:(NSString *)path
+- (NSObject<HTTPResponse> *)httpResponseForMethod:(NSString *)method URI:(NSString *)path
 {
 	// Override me to provide custom responses.
 	
@@ -925,12 +928,20 @@ static NSMutableArray *recentNonces;
 }
 
 /**
- * This method is called to handle data read from a POST.
- * The given data is part of the POST body.
+ * This method is called after receiving all HTTP headers, but before reading any of the request body.
 **/
-- (void)processPostDataChunk:(NSData *)postDataChunk
+- (void)prepareForBodyWithSize:(UInt64)contentLength
 {
-	// Override me to do something useful with a POST.
+	// Override me to allocate buffers, file handles, etc.
+}
+
+/**
+ * This method is called to handle data read from a POST / PUT.
+ * The given data is part of the request body.
+**/
+- (void)processDataChunk:(NSData *)postDataChunk
+{
+	// Override me to do something useful with a POST / PUT.
 	// If the post is small, such as a simple form, you may want to simply append the data to the request.
 	// If the post is big, such as a file upload, you may want to store the file to disk.
 	// 
@@ -1065,12 +1076,30 @@ static NSMutableArray *recentNonces;
 	// Override me to customize the response headers
 	// You'll likely want to add your own custom headers, and then return [super preprocessResponse:response]
 	
+	// Add standard headers
 	NSString *now = [self dateAsString:[NSDate date]];
 	CFHTTPMessageSetHeaderFieldValue(response, CFSTR("Date"), (CFStringRef)now);
 	
+	// Add server capability headers
 	CFHTTPMessageSetHeaderFieldValue(response, CFSTR("Accept-Ranges"), CFSTR("bytes"));
 	
-	NSData *result = (NSData *)CFHTTPMessageCopySerializedMessage(response);
+	// Add optional response headers
+	if([httpResponse respondsToSelector:@selector(httpHeaders)])
+	{
+		NSDictionary *responseHeaders = [httpResponse httpHeaders];
+		
+		NSEnumerator *keyEnumerator = [responseHeaders keyEnumerator];
+		NSString *key;
+		
+		while(key = [keyEnumerator nextObject])
+		{
+			NSString *value = [responseHeaders objectForKey:key];
+			
+			CFHTTPMessageSetHeaderFieldValue(response, (CFStringRef)key, (CFStringRef)value);
+		}
+	}
+	
+	NSData *result = NSMakeCollectable(CFHTTPMessageCopySerializedMessage(response));
 	return [result autorelease];
 }
 
@@ -1099,12 +1128,30 @@ static NSMutableArray *recentNonces;
 	//     CFHTTPMessageSetHeaderFieldValue(response, CFSTR("Content-Length"), (CFStringRef)contentLengthStr);
 	// }
 	
+	// Add standard headers
 	NSString *now = [self dateAsString:[NSDate date]];
 	CFHTTPMessageSetHeaderFieldValue(response, CFSTR("Date"), (CFStringRef)now);
 	
+	// Add server capability headers
 	CFHTTPMessageSetHeaderFieldValue(response, CFSTR("Accept-Ranges"), CFSTR("bytes"));
 	
-	NSData *result = (NSData *)CFHTTPMessageCopySerializedMessage(response);
+	// Add optional response headers
+	if([httpResponse respondsToSelector:@selector(httpHeaders)])
+	{
+		NSDictionary *responseHeaders = [httpResponse httpHeaders];
+		
+		NSEnumerator *keyEnumerator = [responseHeaders keyEnumerator];
+		NSString *key;
+		
+		while(key = [keyEnumerator nextObject])
+		{
+			NSString *value = [responseHeaders objectForKey:key];
+			
+			CFHTTPMessageSetHeaderFieldValue(response, (CFStringRef)key, (CFStringRef)value);
+		}
+	}
+	
+	NSData *result = NSMakeCollectable(CFHTTPMessageCopySerializedMessage(response));
 	return [result autorelease];
 }
 
@@ -1157,6 +1204,20 @@ static NSMutableArray *recentNonces;
 }
 
 /**
+ * This method is called after the socket has been fully opened.
+ * It is called on the proper thread/runloop that HTTPServer configured our socket to run on.
+**/
+- (void)onSocket:(AsyncSocket *)sock didConnectToHost:(NSString *)host port:(UInt16)port
+{
+	// The socket is up and ready, and this method is called on the socket's corresponding thread.
+	// We can now start reading the HTTP requests...
+	[asyncSocket readDataToData:[AsyncSocket CRLFData]
+					withTimeout:READ_TIMEOUT
+					  maxLength:LIMIT_MAX_HEADER_LINE_LENGTH
+							tag:HTTP_REQUEST_HEADER];
+}
+
+/**
  * This method is called after the socket has successfully read data from the stream.
  * Remember that this method will only be called after the socket reaches a CRLF, or after it's read the proper length.
 **/
@@ -1193,42 +1254,68 @@ static NSMutableArray *recentNonces;
 		{
 			// We have an entire HTTP request header from the client
 			
-			// Check to see if it's a POST (upload) request
-			NSString *method = [(NSString *)CFHTTPMessageCopyRequestMethod(request) autorelease];
-			if([method isEqualToString:@"POST"])
+			// Extract the method (such as GET, HEAD, POST, etc)
+			NSString *method = [NSMakeCollectable(CFHTTPMessageCopyRequestMethod(request)) autorelease];
+			
+			// Extract the uri (such as "/index.html")
+			NSURL *uri = [NSMakeCollectable(CFHTTPMessageCopyRequestURL(request)) autorelease];
+			
+			// Check for a Content-Length field
+			NSString *contentLength =
+			    [NSMakeCollectable(CFHTTPMessageCopyHeaderFieldValue(request, CFSTR("Content-Length"))) autorelease];
+			
+			// Content-Length MUST be present for upload methods (such as POST or PUT)
+			// and MUST NOT be present for other methods.
+			BOOL expectsUpload = [method isEqualToString:@"POST"] || [method isEqualToString:@"PUT"];
+			
+			if(expectsUpload)
 			{
-				NSURL *uri = [(NSURL *)CFHTTPMessageCopyRequestURL(request) autorelease];
-				
-				NSString *contentLengthStr =
-				    [(NSString *)CFHTTPMessageCopyHeaderFieldValue(request, CFSTR("Content-Length")) autorelease];
-				
-				if(contentLengthStr == nil)
+				if(contentLength == nil)
 				{
-					// Received POST with no specified Content-Length
+					// Received POST/PUT with no specified Content-Length
 					[self handleInvalidRequest:nil];
 					return;
 				}
 				
-				if(![NSNumber parseString:(NSString *)contentLengthStr intoUInt64:&postContentLength])
+				if(![NSNumber parseString:(NSString *)contentLength intoUInt64:&requestContentLength])
 				{
 					// Unable to parse Content-Length header into a valid number
 					[self handleInvalidRequest:nil];
 					return;
 				}
-				
-				if(![self supportsPOST:[uri relativeString] withSize:postContentLength])
+			}
+			else
+			{
+				if(contentLength != nil)
 				{
-					// POST is unsupported - either in general, or for this specific request
-					// Send a 405 - Method not allowed response
-					[self handleUnknownMethod:method];
+					// Received Content-Length header for method not expecting an upload
+					[self handleInvalidRequest:nil];
 					return;
 				}
 				
-				// Reset the total amount of data received for the POST
-				postTotalBytesReceived = 0;
+				requestContentLength = 0;
+				requestContentLengthReceived = 0;
+			}
+			
+			// Check to make sure the given method is supported
+			if(![self supportsMethod:method atPath:[uri relativeString]])
+			{
+				// The method is unsupported - either in general, or for this specific request
+				// Send a 405 - Method not allowed response
+				[self handleUnknownMethod:method];
+				return;
+			}
+			
+			if(expectsUpload)
+			{
+				// Reset the total amount of data received for the upload
+				requestContentLengthReceived = 0;
 				
-				// Start reading the POST body
-				unsigned int bytesToRead = postContentLength < POST_CHUNKSIZE ? postContentLength : POST_CHUNKSIZE;
+				// Prepare for the upload
+				[self prepareForBodyWithSize:requestContentLength];
+				
+				// Start reading the request body
+				uint bytesToRead = requestContentLength < POST_CHUNKSIZE ? requestContentLength : POST_CHUNKSIZE;
 				
 				[asyncSocket readDataToLength:bytesToRead withTimeout:READ_TIMEOUT tag:HTTP_REQUEST_BODY];
 			}
@@ -1243,15 +1330,15 @@ static NSMutableArray *recentNonces;
 	{
 		// Handle a chunk of data from the POST body
 		
-		postTotalBytesReceived += [data length];
-		[self processPostDataChunk:data];
+		requestContentLengthReceived += [data length];
+		[self processDataChunk:data];
 		
-		if(postTotalBytesReceived < postContentLength)
+		if(requestContentLengthReceived < requestContentLength)
 		{
 			// We're not done reading the post body yet...
-			UInt64 bytesLeft = postContentLength - postTotalBytesReceived;
+			UInt64 bytesLeft = requestContentLength - requestContentLengthReceived;
 			
-			unsigned int bytesToRead = bytesLeft < POST_CHUNKSIZE ? bytesLeft : POST_CHUNKSIZE;
+			uint bytesToRead = bytesLeft < POST_CHUNKSIZE ? bytesLeft : POST_CHUNKSIZE;
 			
 			[asyncSocket readDataToLength:bytesToRead withTimeout:READ_TIMEOUT tag:HTTP_REQUEST_BODY];
 		}
