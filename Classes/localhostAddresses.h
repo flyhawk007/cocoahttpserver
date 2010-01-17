@@ -6,7 +6,7 @@
 #import <Foundation/Foundation.h>
 
 
-@interface localhostAdresses : NSObject {
+@interface localhostAddresses : NSObject {
 
 }
 

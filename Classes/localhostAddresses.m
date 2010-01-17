@@ -3,13 +3,13 @@
 //  who graciously decided to share it with the CocoaHTTPServer community.
 //
 
-#import "localhostAdresses.h"
+#import "localhostAddresses.h"
 
 #import <ifaddrs.h>
 #import <netinet/in.h>
 #import <sys/socket.h>
 
-@implementation localhostAdresses
+@implementation localhostAddresses
 
 + (void)list
 {
@@ -41,11 +41,12 @@
 		}
 		freeifaddrs(addrs);
 	}
+
 	NSURL *netIPURL = [NSURL URLWithString:@"http://whatismyip.org"];
 	NSString *netIP = [NSString stringWithContentsOfURL:netIPURL encoding:NSUTF8StringEncoding error:nil];
 	if (netIP)
 		[result setObject:netIP forKey:@"www"];
-//	NSLog(@"IP addresses: %@", result);
+	NSLog(@"IP addresses: %@", result);
 	[[NSNotificationCenter defaultCenter] postNotificationName:@"LocalhostAdressesResolved" object:result];
 	
 	[pool release];
